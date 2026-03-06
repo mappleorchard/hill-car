@@ -1,16 +1,12 @@
-// Lightweight Nokia / KaiOS d-pad adapter for TurboWarp web builds.
-// Include this file before your main script so d-pad input is available at startup.
-// Safe Response.json wrapper — install early (before script.js) to catch non-JSON responses
+// Safe Response.json wrapper 
 (function () {
   if (!('Response' in window) || !Response.prototype) return;
   try {
     var _origJson = Response.prototype.json;
     Response.prototype.json = function () {
-      // Save reference to the Response object
       var resp = this;
       try {
         var ct = resp.headers && resp.headers.get ? resp.headers.get('content-type') || '' : '';
-        // If content-type isn't JSON-like, read as text and log helpful info
         if (!/application\/(json|.+\+json)/i.test(ct)) {
           return resp.text().then(function (text) {
             console.error('Non-JSON response when JSON was expected:', {
@@ -19,108 +15,103 @@
               contentType: ct,
               preview: (typeof text === 'string' ? text.slice(0, 200) : text)
             });
-            // Throw to keep existing code behavior (but with clearer message)
             throw new Error('Non-JSON response for ' + (resp.url || '(unknown url)') + '; see console for preview');
           });
         }
-      } catch (e) {
-        // If anything goes wrong checking headers, fall back to original behavior below
-      }
-      // If content-type is JSON-ish, call original .json()
+      } catch (e) {}
       return _origJson.call(this);
     };
-  } catch (err) {
-    // If the environment doesn't allow overriding, just skip silently
-    try { console.warn('Could not install safe Response.json wrapper', err); } catch (e) {}
-  }
+  } catch (err) {}
 })();
+
+// Advanced Nokia / KaiOS d-pad adapter
 (function () {
   'use strict';
 
-  // Normalize to a small set: 'up','down','left','right','enter','space'
+  var keyState = { up: false, down: false, left: false, right: false, enter: false, space: false, softLeft: false, softRight: false };
+  var keyMap = { 'up': 'ArrowUp', 'down': 'ArrowDown', 'left': 'ArrowLeft', 'right': 'ArrowRight', 'enter': 'Enter', 'space': ' ', 'softLeft': 'Shift', 'softRight': 'Control' };
+
+  // Optimization: Pre-allocate event names for faster dispatch
+  var EVENT_NAME = 'nokia-dpad';
+
   function normalizeDpadEvent(e) {
     var kc = e.keyCode || e.which || 0;
     var k = e.key || '';
-
-    // Standard keys
-    if (k === 'ArrowUp' || kc === 38) return 'up';
-    if (k === 'ArrowDown' || kc === 40) return 'down';
-    if (k === 'ArrowLeft' || kc === 37) return 'left';
-    if (k === 'ArrowRight' || kc === 39) return 'right';
+    // Priority check for common Nokia/KaiOS codes
+    if (k === 'ArrowUp' || kc === 38 || kc === 50) return 'up';
+    if (k === 'ArrowDown' || kc === 40 || kc === 56) return 'down';
+    if (k === 'ArrowLeft' || kc === 37 || kc === 52) return 'left';
+    if (k === 'ArrowRight' || kc === 39 || kc === 54) return 'right';
     if (k === 'Enter' || kc === 13) return 'enter';
-    if (k === ' ' || kc === 32) return 'space';
-
-    // Feature-phone / KaiOS fallbacks (common alternate mappings)
-    // Map numeric keypad 2/8/4/6 to arrows if device doesn't produce Arrow keys.
-    if (kc === 50 /* '2' */) return 'up';
-    if (kc === 56 /* '8' */) return 'down';
-    if (kc === 52 /* '4' */) return 'left';
-    if (kc === 54 /* '6' */) return 'right';
-    if (kc === 53 /* '5' */) return 'space';
-
-    // Add additional device-specific mappings here if you discover them
+    if (k === ' ' || kc === 32 || kc === 53) return 'space';
+    if (k === 'SoftLeft' || kc === 407 || kc === 65 /* 'a' for emulator */) return 'softLeft';
+    if (k === 'SoftRight' || kc === 408 || kc === 83 /* 's' for emulator */) return 'softRight';
     return null;
   }
 
-  // Forward normalized events into the app
   function forwardEvent(action, isDown, originalEvent) {
-    try { originalEvent && originalEvent.preventDefault(); } catch (e) {}
+    if (keyState[action] === isDown) return;
+    keyState[action] = isDown;
 
-    // Dispatch a simple custom event so the app can listen explicitly for d-pad input
-    var ev = new CustomEvent('nokia-dpad', {
-      detail: { action: action, down: !!isDown, sourceEvent: originalEvent },
-      bubbles: true,
-      cancelable: true
-    });
-    window.dispatchEvent(ev);
+    // Haptic Feedback: subtle vibration for physical buttons (KaiOS/Web Standard)
+    if (isDown && navigator.vibrate) {
+      navigator.vibrate(10); 
+    }
 
-    // For compatibility: also synthesize keyboard events (so code listening for Arrow keys / Enter works)
-    var synthKey = null;
-    if (action === 'up') synthKey = 'ArrowUp';
-    if (action === 'down') synthKey = 'ArrowDown';
-    if (action === 'left') synthKey = 'ArrowLeft';
-    if (action === 'right') synthKey = 'ArrowRight';
-    if (action === 'enter') synthKey = 'Enter';
-    if (action === 'space') synthKey = ' ';
+    // Prevent default browser scrolling/actions
+    if (originalEvent && originalEvent.cancelable) {
+      var tag = (originalEvent.target && originalEvent.target.tagName || '').toLowerCase();
+      if (tag !== 'input' && tag !== 'textarea') {
+        originalEvent.preventDefault();
+      }
+    }
 
+    // Dispatch Custom Event with active key list for chord detection
+    var activeList = [];
+    for (var k in keyState) { if (keyState[k]) activeList.push(k); }
+    
+    window.dispatchEvent(new CustomEvent(EVENT_NAME, {
+      detail: { action: action, down: isDown, activeKeys: activeList }
+    }));
+
+    // Synthesize KeyboardEvent for engines like TurboWarp
+    var synthKey = keyMap[action];
     if (synthKey) {
       try {
-        var type = isDown ? 'keydown' : 'keyup';
-        var se = new KeyboardEvent(type, { key: synthKey, bubbles: true, cancelable: true });
+        var se = new KeyboardEvent(isDown ? 'keydown' : 'keyup', { 
+          key: synthKey, 
+          code: synthKey,
+          bubbles: true, 
+          cancelable: true,
+          shiftKey: keyState.softLeft,
+          ctrlKey: keyState.softRight
+        });
         document.dispatchEvent(se);
       } catch (err) {
-        // Older engines may not allow new KeyboardEvent; ignore in that case.
+        // Fallback for older browsers
+        var evt = document.createEvent('KeyboardEvent');
+        evt.initEvent(isDown ? 'keydown' : 'keyup', true, true);
+        document.dispatchEvent(evt);
       }
     }
   }
 
   function handleKey(e, isDown) {
+    if (e.isTrusted === false) return; 
     var action = normalizeDpadEvent(e);
-    if (!action) return;
-    forwardEvent(action, isDown, e);
+    if (action) forwardEvent(action, isDown, e);
   }
 
-  // Attach listeners (use capture so we get them early and can prevent default navigation)
-  document.addEventListener('keydown', function (e) { handleKey(e, true); }, true);
-  document.addEventListener('keyup', function (e) { handleKey(e, false); }, true);
+  // Use {passive: false} to ensure preventDefault() works for game controls
+  document.addEventListener('keydown', function (e) { handleKey(e, true); }, { capture: true, passive: false });
+  document.addEventListener('keyup', function (e) { handleKey(e, false); }, { capture: true, passive: false });
 
-  // Some phones only fire keypress for center/dpad; treat keypress as down and synthesize an up soon after.
-  document.addEventListener('keypress', function (e) {
-    var action = normalizeDpadEvent(e);
-    if (!action) return;
-    handleKey(e, true);
-    // schedule a synthetic keyup shortly after so apps expecting keyup still receive it
-    setTimeout(function () { forwardEvent(action, false, e); }, 120);
-  }, true);
+  // Safety Reset: release all keys if user switches apps or menu opens
+  window.addEventListener('blur', function() {
+    for (var action in keyState) {
+      if (keyState[action]) forwardEvent(action, false, null);
+    }
+  });
 
-  // Convenience log for devices with Nokia/KaiOS user agents
-  if (/KaiOS|Nokia/i.test(navigator.userAgent)) {
-    try { console.info('Nokia/KaiOS d-pad adapter active'); } catch (e) {}
-  }
-
-  // Example: how to listen in your game code:
-  // window.addEventListener('nokia-dpad', e => {
-  //   const { action, down } = e.detail;
-  //   // map action/down to your input state
-  // });
+  console.log('Nokia Advanced Multi-Key Adapter Loaded');
 })();
